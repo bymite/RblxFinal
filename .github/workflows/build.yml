@@ -13,28 +13,31 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install Theos
+      - name: Install ldid & dependencies
         run: |
-          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
-          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+          brew install ldid
 
-      - name: Build dylib
+      - name: Build dylib with clang
         run: |
-          export THEOS=$HOME/theos
-          make clean
-          make
-
-      - name: Find built dylib
-        run: |
-          DYLIB=$(find . -name "RobloxProxy.dylib" | head -n 1)
-          echo "DYLIB_PATH=$DYLIB" >> $GITHUB_ENV
-          echo "Found dylib at: $DYLIB"
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          clang \
+            -arch arm64 \
+            -isysroot "$SDK" \
+            -miphoneos-version-min=14.0 \
+            -dynamiclib \
+            -fobjc-arc \
+            -framework Foundation \
+            -framework CFNetwork \
+            -o RobloxProxy.dylib \
+            Tweak.m
+          echo "Built dylib:"
+          ls -lh RobloxProxy.dylib
 
       - name: Install insert_dylib
         run: |
           git clone https://github.com/tyilo/insert_dylib
           cd insert_dylib/insert_dylib
-          xcodebuild -configuration Release
+          xcodebuild -configuration Release -quiet
           sudo cp build/Release/insert_dylib /usr/local/bin/
 
       - name: Download IPA
@@ -50,7 +53,7 @@ jobs:
           echo "App: $APP"
           echo "Binary: $BINARY"
 
-          cp "$DYLIB_PATH" "$APP/RobloxProxy.dylib"
+          cp RobloxProxy.dylib "$APP/RobloxProxy.dylib"
 
           insert_dylib --strip-codesig --inplace \
             @executable_path/RobloxProxy.dylib \
