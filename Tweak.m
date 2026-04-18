@@ -2,11 +2,10 @@
 #import <objc/runtime.h>
 #import <UIKit/UIKit.h>
 
-// --- Configuration ---
+// Use the standard CFProxy keys to avoid "unavailable" errors
 #define PROXY_HOST @"roundhouse.proxy.rlwy.net"
 #define PROXY_PORT @58298
 
-// --- Swizzling Helper ---
 void swizzle(Class class, SEL originalSelector, SEL swizzledSelector) {
     Method originalMethod = class_getClassMethod(class, originalSelector);
     Method swizzledMethod = class_getClassMethod(class, swizzledSelector);
@@ -21,29 +20,20 @@ void swizzle(Class class, SEL originalSelector, SEL swizzledSelector) {
 + (NSURLSessionConfiguration *)hooked_defaultSessionConfiguration {
     NSURLSessionConfiguration *config = [self hooked_defaultSessionConfiguration];
     
-    // Inject the proxy settings dictionary
+    // Using modern CFProxy keys to fix the Build Error
     NSDictionary *proxyDict = @{
-        (id)kCFNetworkProxiesHTTPEnable: @1,
-        (id)kCFNetworkProxiesHTTPProxy: PROXY_HOST,
-        (id)kCFNetworkProxiesHTTPPort: PROXY_PORT,
-        (id)kCFNetworkProxiesHTTPSEnable: @1,
-        (id)kCFNetworkProxiesHTTPSProxy: PROXY_HOST,
-        (id)kCFNetworkProxiesHTTPSPort: PROXY_PORT,
+        (id)kCFProxyTypeKey: (id)kCFProxyTypeHTTP,
+        (id)kCFProxyHostNameKey: PROXY_HOST,
+        (id)kCFProxyPortNumberKey: PROXY_PORT,
     };
     
     config.connectionProxyDictionary = proxyDict;
     return config;
 }
-
 @end
 
-// --- Initialization ---
 __attribute__((constructor))
 static void init() {
-    NSLog(@"[ProxyTweak] Initializing Domain Filter...");
-
-    // Swizzle the default and ephemeral configurations
-    // This covers almost all modern iOS network requests
     swizzle([NSURLSessionConfiguration class], 
             @selector(defaultSessionConfiguration), 
             @selector(hooked_defaultSessionConfiguration));
@@ -52,13 +42,22 @@ static void init() {
             @selector(ephemeralSessionConfiguration), 
             @selector(hooked_defaultSessionConfiguration));
 
-    // Simple Alert to confirm it loaded
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UIViewController *root = [UIApplication sharedApplication].keyWindow.rootViewController;
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Proxy Active" 
-                                                                       message:@"Domain Filtering Enabled" 
-                                                                preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        [root presentViewController:alert animated:YES completion:nil];
+    // Fixed UI notification logic for modern iOS
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIWindow *window = nil;
+        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (scene.activationState == UISceneActivationStateForegroundActive) {
+                window = scene.windows.firstObject;
+                break;
+            }
+        }
+        
+        if (window) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Domain Filter" 
+                                                                           message:@"Proxy Active via Railway" 
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [window.rootViewController presentViewController:alert animated:YES completion:nil];
+        }
     });
 }
