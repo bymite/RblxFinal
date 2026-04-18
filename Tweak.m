@@ -45,11 +45,10 @@ static const char *lookup_host(uint32_t ip) {
 static int hook_getaddrinfo(const char *hostname, const char *servname,
                              const struct addrinfo *hints, struct addrinfo **res) {
     int result = orig_getaddrinfo(hostname, servname, hints, res);
-    if (result == 0 && hostname && res && *res) {
+    if (result == 0 && hostname && res && *res)
         for (struct addrinfo *ai = *res; ai; ai = ai->ai_next)
             if (ai->ai_family == AF_INET)
                 cache_host(((struct sockaddr_in *)ai->ai_addr)->sin_addr.s_addr, hostname);
-    }
     return result;
 }
 
@@ -59,10 +58,9 @@ static void show_banner(NSString *message) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *window = nil;
         for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]]) {
+            if ([scene isKindOfClass:[UIWindowScene class]])
                 for (UIWindow *w in ((UIWindowScene *)scene).windows)
                     if (w.isKeyWindow) { window = w; break; }
-            }
         }
         if (!window) return;
         UIView *banner = [[UIView alloc] initWithFrame:CGRectMake(0, 60, window.bounds.size.width, 50)];
@@ -90,48 +88,40 @@ static void show_banner(NSString *message) {
 
 static void resolve_proxy() {
     if (proxy_ip != 0) return;
+    hooking_active = 1;
     struct hostent *he = gethostbyname(PROXY_HOST);
+    hooking_active = 0;
     if (he && he->h_addrtype == AF_INET)
         memcpy(&proxy_ip, he->h_addr_list[0], 4);
 }
 
-// Wait for a non-blocking connect() to complete
-static int wait_connected(int sockfd, int timeout_sec) {
-    fd_set wfds;
-    FD_ZERO(&wfds);
-    FD_SET(sockfd, &wfds);
-    struct timeval tv = { timeout_sec, 0 };
-    int r = select(sockfd + 1, NULL, &wfds, NULL, &tv);
-    if (r <= 0) return -1;
-    int err = 0;
-    socklen_t len = sizeof(err);
-    getsockopt(sockfd, SOL_SOCKET, SO_ERROR, &err, &len);
+static int wait_for_connect(int fd, int secs) {
+    fd_set w; FD_ZERO(&w); FD_SET(fd, &w);
+    struct timeval tv = {secs, 0};
+    if (select(fd+1, NULL, &w, NULL, &tv) <= 0) return -1;
+    int err = 0; socklen_t l = sizeof(err);
+    getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &l);
     return err == 0 ? 0 : -1;
 }
 
-static int socks5_handshake(int sockfd, const char *dest_host, int dest_port) {
-    uint8_t greeting[] = {0x05, 0x01, 0x00};
-    if (send(sockfd, greeting, 3, MSG_NOSIGNAL) < 0) return -1;
-    uint8_t resp[2];
-    if (recv(sockfd, resp, 2, 0) < 2) return -1;
-    if (resp[1] != 0x00) return -1;
+static int socks5_handshake(int fd, const char *host, int port) {
+    uint8_t g[] = {0x05, 0x01, 0x00};
+    if (send(fd, g, 3, MSG_NOSIGNAL) < 0) return -1;
+    uint8_t r[2]; if (recv(fd, r, 2, 0) < 2 || r[1] != 0x00) return -1;
 
-    size_t hlen = strlen(dest_host);
-    uint8_t req[7 + 256];
+    size_t hl = strlen(host);
+    uint8_t req[7+256];
     req[0]=0x05; req[1]=0x01; req[2]=0x00; req[3]=0x03;
-    req[4]=(uint8_t)hlen;
-    memcpy(req+5, dest_host, hlen);
-    req[5+hlen]=(dest_port>>8)&0xFF;
-    req[6+hlen]=dest_port&0xFF;
-    if (send(sockfd, req, 7+hlen, MSG_NOSIGNAL) < 0) return -1;
+    req[4]=(uint8_t)hl;
+    memcpy(req+5, host, hl);
+    req[5+hl]=(port>>8)&0xFF; req[6+hl]=port&0xFF;
+    if (send(fd, req, 7+hl, MSG_NOSIGNAL) < 0) return -1;
 
-    uint8_t sresp[10];
-    if (recv(sockfd, sresp, 10, 0) < 2) return -1;
-    if (sresp[1] != 0x00) return -1;
+    uint8_t sr[10]; if (recv(fd, sr, 10, 0) < 2 || sr[1] != 0x00) return -1;
     return 0;
 }
 
-#pragma mark - Hook connect
+#pragma mark - Hook
 
 static int hook_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     if (!addr || hooking_active)
@@ -148,55 +138,55 @@ static int hook_connect(int sockfd, const struct sockaddr *addr, socklen_t addrl
         return orig_connect(sockfd, addr, addrlen);
 
     resolve_proxy();
-    if (proxy_ip == 0)
-        return orig_connect(sockfd, addr, addrlen);
-
-    if (s->sin_addr.s_addr == proxy_ip)
+    if (proxy_ip == 0 || s->sin_addr.s_addr == proxy_ip)
         return orig_connect(sockfd, addr, addrlen);
 
     const char *hostname = lookup_host(s->sin_addr.s_addr);
     const char *dest = hostname ? hostname : dest_ip;
 
-    // Get current blocking state
+    // Save flags and force blocking
     int flags = fcntl(sockfd, F_GETFL, 0);
-    int was_nonblocking = (flags & O_NONBLOCK) != 0;
+    fcntl(sockfd, F_SETFL, flags & ~O_NONBLOCK);
 
-    struct sockaddr_in proxy_addr;
-    memset(&proxy_addr, 0, sizeof(proxy_addr));
-    proxy_addr.sin_family = AF_INET;
-    memcpy(&proxy_addr.sin_addr, &proxy_ip, 4);
-    proxy_addr.sin_port = htons(PROXY_PORT);
-
-    // Force blocking for handshake
-    if (was_nonblocking)
-        fcntl(sockfd, F_SETFL, flags & ~O_NONBLOCK);
+    // Connect to proxy
+    struct sockaddr_in px;
+    memset(&px, 0, sizeof(px));
+    px.sin_family = AF_INET;
+    memcpy(&px.sin_addr, &proxy_ip, 4);
+    px.sin_port = htons(PROXY_PORT);
 
     hooking_active = 1;
-    int result = orig_connect(sockfd, (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+    int r = orig_connect(sockfd, (struct sockaddr *)&px, sizeof(px));
     hooking_active = 0;
 
-    // If non-blocking returned EINPROGRESS, wait for it
-    if (result != 0 && errno == EINPROGRESS) {
-        result = wait_connected(sockfd, 10);
-    }
+    if (r != 0 && errno == EINPROGRESS)
+        r = wait_for_connect(sockfd, 10);
 
-    if (result != 0) {
-        if (was_nonblocking) fcntl(sockfd, F_SETFL, flags);
+    if (r != 0) {
+        fcntl(sockfd, F_SETFL, flags);
         return orig_connect(sockfd, addr, addrlen);
     }
 
-    result = socks5_handshake(sockfd, dest, dest_port);
+    // Do SOCKS5 handshake
+    r = socks5_handshake(sockfd, dest, dest_port);
 
-    // Restore non-blocking if needed
-    if (was_nonblocking) fcntl(sockfd, F_SETFL, flags);
+    // Restore original flags
+    fcntl(sockfd, F_SETFL, flags);
 
-    // If we restored non-blocking, Roblox expects EINPROGRESS on success
-    if (result == 0 && was_nonblocking) {
-        errno = EINPROGRESS;
-        return -1; // looks like normal async connect to caller
-    }
+    // Return 0 = connected. Caller handles it correctly whether blocking or not.
+    return r;
+}
 
-    return result;
+// Also hook NSURLSession
+static NSURLSessionConfiguration *(*orig_defaultConfig)(id, SEL);
+static NSURLSessionConfiguration *hook_defaultConfig(id self, SEL _cmd) {
+    NSURLSessionConfiguration *c = orig_defaultConfig(self, _cmd);
+    c.connectionProxyDictionary = @{
+        @"SOCKSEnable": @1,
+        @"SOCKSProxy": @PROXY_HOST,
+        @"SOCKSPort": @PROXY_PORT,
+    };
+    return c;
 }
 
 #pragma mark - Init
@@ -207,6 +197,11 @@ static void init() {
         {"connect",     hook_connect,     (void **)&orig_connect},
         {"getaddrinfo", hook_getaddrinfo, (void **)&orig_getaddrinfo},
     }, 2);
+
+    Method m = class_getClassMethod([NSURLSessionConfiguration class],
+                                    @selector(defaultSessionConfiguration));
+    orig_defaultConfig = (void *)method_getImplementation(m);
+    method_setImplementation(m, (IMP)hook_defaultConfig);
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2*NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
