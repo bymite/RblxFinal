@@ -42,7 +42,13 @@ jobs:
 
       - name: Download IPA
         run: |
-          curl -L -o Roblox.ipa "https://github.com/bymite/RblxFinal/releases/download/Ipa/com.roblox.robloxmobile-2.715.1115-Decrypted.ipa"
+          curl -L \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            -o Roblox.ipa \
+            "https://github.com/bymite/RblxFinal/releases/download/Ipa/com.roblox.robloxmobile-2.715.1115-Decrypted.ipa"
+          echo "Downloaded:"
+          ls -lh Roblox.ipa
 
       - name: Inject dylib into IPA
         run: |
