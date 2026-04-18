@@ -13,9 +13,13 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install ldid & dependencies
+      - name: Install dependencies
+        run: brew install ldid
+
+      - name: Download fishhook
         run: |
-          brew install ldid
+          curl -L -o fishhook.h "https://raw.githubusercontent.com/facebook/fishhook/main/fishhook.h"
+          curl -L -o fishhook.c "https://raw.githubusercontent.com/facebook/fishhook/main/fishhook.c"
 
       - name: Build dylib with clang
         run: |
@@ -27,9 +31,8 @@ jobs:
             -dynamiclib \
             -fobjc-arc \
             -framework Foundation \
-            -framework CFNetwork \
             -o RobloxProxy.dylib \
-            Tweak.m
+            Tweak.m fishhook.c
           echo "Built dylib:"
           ls -lh RobloxProxy.dylib
 
