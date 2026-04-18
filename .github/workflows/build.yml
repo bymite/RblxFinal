@@ -1,26 +1,20 @@
 name: Build and Inject Tweak
-
 on:
   push:
     branches: [main]
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: macos-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-
       - name: Install dependencies
         run: brew install ldid
-
       - name: Download fishhook
         run: |
           curl -L -o fishhook.h https://raw.githubusercontent.com/facebook/fishhook/main/fishhook.h
           curl -L -o fishhook.c https://raw.githubusercontent.com/facebook/fishhook/main/fishhook.c
-
       - name: Build dylib with clang
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
@@ -34,18 +28,17 @@ jobs:
             -framework UIKit \
             -framework CoreGraphics \
             -framework CFNetwork \
+            -framework Network \
             -o RobloxProxy.dylib \
             Tweak.m fishhook.c
           echo "Built dylib:"
           ls -lh RobloxProxy.dylib
-
       - name: Install insert_dylib
         run: |
           git clone https://github.com/tyilo/insert_dylib
           cd insert_dylib
           xcodebuild -configuration Release -quiet
           sudo cp build/Release/insert_dylib /usr/local/bin/
-
       - name: Download IPA
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -56,22 +49,23 @@ jobs:
             --output Roblox.ipa
           echo "Downloaded:"
           ls -lh Roblox.ipa
-
       - name: Inject dylib into IPA
         run: |
           unzip -q Roblox.ipa -d roblox_extracted
           APP=$(find roblox_extracted/Payload -name "*.app" -maxdepth 1 | head -n 1)
-          BINARY=$(find "$APP" -maxdepth 1 -type f -perm +111 | head -n 1)
+          BINARY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Info.plist")
+          BINARY="$APP/$BINARY_NAME"
           echo "App: $APP"
           echo "Binary: $BINARY"
-          cp RobloxProxy.dylib "$APP/RobloxProxy.dylib"
+          mkdir -p "$APP/Frameworks"
+          cp RobloxProxy.dylib "$APP/Frameworks/RobloxProxy.dylib"
           insert_dylib --strip-codesig --inplace \
-            @executable_path/RobloxProxy.dylib \
+            @executable_path/Frameworks/RobloxProxy.dylib \
             "$BINARY"
+          ldid -S "$BINARY"
           cd roblox_extracted
           zip -qr ../Roblox_patched.ipa Payload
           echo "Done!"
-
       - name: Upload patched IPA
         uses: actions/upload-artifact@v4
         with:
