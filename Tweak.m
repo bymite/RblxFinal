@@ -22,21 +22,19 @@ static void resolve_proxy() {
     if (he) memcpy(&proxy_ip, he->h_addr_list[0], 4);
 }
 
-// REMOTE DNS HANDSHAKE: This is the critical fix
+// Bypasses local DNS by sending the domain name directly to Railway
 static int socks5_handshake_remote_dns(int sockfd, const char *domain, int dest_port) {
-    // 1. Greeting
     uint8_t greeting[] = {0x05, 0x01, 0x00};
     if (send(sockfd, greeting, 3, 0) < 0) return -1;
     uint8_t resp[2];
     if (recv(sockfd, resp, 2, 0) < 2 || resp[1] != 0x00) return -1;
 
-    // 2. Request with Domain Name (ATYP 0x03)
     uint8_t req[512];
     int i = 0;
-    req[i++] = 0x05; // SOCKS5
-    req[i++] = 0x01; // CONNECT
-    req[i++] = 0x00; // Reserved
-    req[i++] = 0x03; // ATYP: Domain Name
+    req[i++] = 0x05; 
+    req[i++] = 0x01; 
+    req[i++] = 0x00; 
+    req[i++] = 0x03; // ATYP: Domain Name (Remote DNS)
     
     size_t domain_len = strlen(domain);
     req[i++] = (uint8_t)domain_len;
@@ -47,8 +45,6 @@ static int socks5_handshake_remote_dns(int sockfd, const char *domain, int dest_
     req[i++] = dest_port & 0xFF;
 
     if (send(sockfd, req, i, 0) < 0) return -1;
-
-    // 3. Server Response
     uint8_t sresp[10];
     if (recv(sockfd, sresp, 10, 0) < 2 || sresp[1] != 0x00) return -1;
 
@@ -62,7 +58,6 @@ static int hook_connect(int sockfd, const struct sockaddr *addr, socklen_t addrl
     struct sockaddr_in *s = (struct sockaddr_in *)addr;
     int dest_port = ntohs(s->sin_port);
 
-    // Only intercept Roblox API/Game traffic (Port 443)
     if (dest_port != 443) return orig_connect(sockfd, addr, addrlen);
 
     resolve_proxy();
@@ -79,17 +74,29 @@ static int hook_connect(int sockfd, const struct sockaddr *addr, socklen_t addrl
     hooking_active = 0;
 
     if (result == 0) {
-        // We pass "roblox.com" to let the proxy handle the DNS lookup
-        if (socks5_handshake_remote_dns(sockfd, "roblox.com", dest_port) != 0) {
-            return -1; // Fail if handshake fails to prevent leak
-        }
+        if (socks5_handshake_remote_dns(sockfd, "roblox.com", dest_port) != 0) return -1;
         return 0;
     }
-
     return orig_connect(sockfd, addr, addrlen);
 }
 
 __attribute__((constructor))
 static void init() {
     rebind_symbols((struct rebinding[1]){{"connect", hook_connect, (void **)&orig_connect}}, 1);
+    
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        UIWindow *window = nil;
+        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (scene.activationState == UISceneActivationStateForegroundActive) {
+                window = scene.windows.firstObject;
+                break;
+            }
+        }
+        if (window) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Proxy Running" 
+                message:@"Remote DNS Bypass Active" preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [window.rootViewController presentViewController:alert animated:YES completion:nil];
+        }
+    });
 }
