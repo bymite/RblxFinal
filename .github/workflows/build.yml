@@ -15,10 +15,14 @@ jobs:
       - name: Install deps
         run: brew install ldid
 
+      - name: Download fishhook
+        run: |
+          curl -L -o fishhook.h https://raw.githubusercontent.com/facebook/fishhook/main/fishhook.h
+          curl -L -o fishhook.c https://raw.githubusercontent.com/facebook/fishhook/main/fishhook.c
+
       - name: Build dylib
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-
           clang \
             -arch arm64 \
             -isysroot "$SDK" \
@@ -27,10 +31,9 @@ jobs:
             -fobjc-arc \
             -framework Foundation \
             -framework UIKit \
-            -framework CoreGraphics \
             -framework CFNetwork \
             -o RobloxProxy.dylib \
-            Tweak.m
+            Tweak.m fishhook.c
 
       - name: Install insert_dylib
         run: |
@@ -40,8 +43,6 @@ jobs:
           sudo cp build/Release/insert_dylib /usr/local/bin/
 
       - name: Download IPA
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           gh release download Ipa \
             --repo bymite/RblxFinal \
@@ -57,16 +58,15 @@ jobs:
           cp RobloxProxy.dylib "$APP/"
           insert_dylib --strip-codesig --inplace \
             @executable_path/RobloxProxy.dylib "$BIN"
-
-          # Signing the dylib and binary to prevent immediate crashes
+          
+          # Sign both files so iOS allows them to run
           ldid -S RobloxProxy.dylib
           ldid -S "$BIN"
 
           cd app
-          zip -qry ../Roblox-Injected.ipa Payload
+          zip -qr ../patched.ipa Payload
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: Injected-IPA
-          path: Roblox-Injected.ipa
+          name: patched-ipa
+          path: patched.ipa
