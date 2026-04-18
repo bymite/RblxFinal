@@ -10,10 +10,9 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install deps
         run: brew install ldid
 
       - name: Download fishhook
@@ -21,9 +20,10 @@ jobs:
           curl -L -o fishhook.h https://raw.githubusercontent.com/facebook/fishhook/main/fishhook.h
           curl -L -o fishhook.c https://raw.githubusercontent.com/facebook/fishhook/main/fishhook.c
 
-      - name: Build dylib with clang
+      - name: Build dylib
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+
           clang \
             -arch arm64 \
             -isysroot "$SDK" \
@@ -36,8 +36,6 @@ jobs:
             -framework CFNetwork \
             -o RobloxProxy.dylib \
             Tweak.m fishhook.c
-          echo "Built dylib:"
-          ls -lh RobloxProxy.dylib
 
       - name: Install insert_dylib
         run: |
@@ -47,34 +45,26 @@ jobs:
           sudo cp build/Release/insert_dylib /usr/local/bin/
 
       - name: Download IPA
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release download Ipa \
             --repo bymite/RblxFinal \
             --pattern "*.ipa" \
             --output Roblox.ipa
-          echo "Downloaded:"
-          ls -lh Roblox.ipa
 
-      - name: Inject dylib into IPA
+      - name: Inject dylib
         run: |
-          unzip -q Roblox.ipa -d roblox_extracted
-          APP=$(find roblox_extracted/Payload -name "*.app" -maxdepth 1 | head -n 1)
-          BINARY=$(find "$APP" -maxdepth 1 -type f -perm +111 | head -n 1)
-          echo "App: $APP"
-          echo "Binary: $BINARY"
-          cp RobloxProxy.dylib "$APP/RobloxProxy.dylib"
-          insert_dylib --strip-codesig --inplace \
-            @executable_path/RobloxProxy.dylib \
-            "$BINARY"
-          cd roblox_extracted
-          zip -qr ../Roblox_patched.ipa Payload
-          echo "Done!"
+          unzip -q Roblox.ipa -d app
+          APP=$(find app/Payload -name "*.app" -maxdepth 1 | head -n 1)
+          BIN=$(find "$APP" -type f -perm +111 | head -n 1)
 
-      - name: Upload patched IPA
-        uses: actions/upload-artifact@v4
+          cp RobloxProxy.dylib "$APP/"
+          insert_dylib --strip-codesig --inplace \
+            @executable_path/RobloxProxy.dylib "$BIN"
+
+          cd app
+          zip -qr ../patched.ipa Payload
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: Roblox_patched
-          path: Roblox_patched.ipa
-          retention-days: 7
+          name: patched-ipa
+          path: patched.ipa
