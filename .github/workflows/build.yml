@@ -35,6 +35,7 @@ jobs:
             -framework CFNetwork \
             -o RobloxProxy.dylib \
             Tweak.m fishhook.c
+
           echo "Built dylib:"
           ls -lh RobloxProxy.dylib
 
@@ -53,23 +54,34 @@ jobs:
             --repo bymite/RblxFinal \
             --pattern "*.ipa" \
             --output Roblox.ipa
+
           echo "Downloaded:"
           ls -lh Roblox.ipa
 
       - name: Inject dylib into IPA
         run: |
           unzip -q Roblox.ipa -d roblox_extracted
+
           APP=$(find roblox_extracted/Payload -name "*.app" -maxdepth 1 | head -n 1)
-          BINARY=$(find "$APP" -maxdepth 1 -type f -perm +111 | head -n 1)
+
+          BINARY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Info.plist")
+          BINARY="$APP/$BINARY_NAME"
+
           echo "App: $APP"
           echo "Binary: $BINARY"
-          cp RobloxProxy.dylib "$APP/RobloxProxy.dylib"
+
+          mkdir -p "$APP/Frameworks"
+          cp RobloxProxy.dylib "$APP/Frameworks/RobloxProxy.dylib"
+
           insert_dylib --strip-codesig --inplace \
-            @executable_path/RobloxProxy.dylib \
+            @executable_path/Frameworks/RobloxProxy.dylib \
             "$BINARY"
+
+          # resign
+          ldid -S "$BINARY"
+
           cd roblox_extracted
           zip -qr ../Roblox_patched.ipa Payload
-          echo "Done!"
 
       - name: Upload patched IPA
         uses: actions/upload-artifact@v4
