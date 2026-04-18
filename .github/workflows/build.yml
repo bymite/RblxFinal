@@ -36,7 +36,7 @@ jobs:
       - name: Install insert_dylib
         run: |
           git clone https://github.com/tyilo/insert_dylib
-          cd insert_dylib/insert_dylib
+          cd insert_dylib
           xcodebuild -configuration Release -quiet
           sudo cp build/Release/insert_dylib /usr/local/bin/
 
