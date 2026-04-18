@@ -43,6 +43,8 @@ jobs:
           sudo cp build/Release/insert_dylib /usr/local/bin/
 
       - name: Download IPA
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh release download Ipa \
             --repo bymite/RblxFinal \
@@ -59,7 +61,6 @@ jobs:
           insert_dylib --strip-codesig --inplace \
             @executable_path/RobloxProxy.dylib "$BIN"
           
-          # Sign both files so iOS allows them to run
           ldid -S RobloxProxy.dylib
           ldid -S "$BIN"
 
