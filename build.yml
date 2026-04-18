@@ -1,0 +1,69 @@
+name: Build and Inject Tweak
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install Theos
+        run: |
+          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+
+      - name: Build dylib
+        run: |
+          export THEOS=$HOME/theos
+          make clean
+          make
+
+      - name: Find built dylib
+        run: |
+          DYLIB=$(find . -name "RobloxProxy.dylib" | head -n 1)
+          echo "DYLIB_PATH=$DYLIB" >> $GITHUB_ENV
+          echo "Found dylib at: $DYLIB"
+
+      - name: Install insert_dylib
+        run: |
+          git clone https://github.com/tyilo/insert_dylib
+          cd insert_dylib/insert_dylib
+          xcodebuild -configuration Release
+          sudo cp build/Release/insert_dylib /usr/local/bin/
+
+      - name: Download IPA
+        run: |
+          curl -L -o Roblox.ipa "https://github.com/bymite/RblxFinal/releases/download/Ipa/com.roblox.robloxmobile-2.715.1115-Decrypted.ipa"
+
+      - name: Inject dylib into IPA
+        run: |
+          unzip -q Roblox.ipa -d roblox_extracted
+
+          APP=$(find roblox_extracted/Payload -name "*.app" -maxdepth 1 | head -n 1)
+          BINARY=$(find "$APP" -maxdepth 1 -type f -perm +111 | head -n 1)
+          echo "App: $APP"
+          echo "Binary: $BINARY"
+
+          cp "$DYLIB_PATH" "$APP/RobloxProxy.dylib"
+
+          insert_dylib --strip-codesig --inplace \
+            @executable_path/RobloxProxy.dylib \
+            "$BINARY"
+
+          cd roblox_extracted
+          zip -qr ../Roblox_patched.ipa Payload
+          cd ..
+          echo "Done!"
+
+      - name: Upload patched IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Roblox_patched
+          path: Roblox_patched.ipa
+          retention-days: 7
