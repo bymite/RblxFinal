@@ -1,6 +1,8 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <CoreGraphics/CoreGraphics.h>   // ✅ FIX: ensures CGRectInset links
 #import <objc/runtime.h>
+
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -9,6 +11,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+
 #include "fishhook.h"
 
 #define PROXY_HOST "roundhouse.proxy.rlwy.net"
@@ -24,9 +27,10 @@ static void show_banner(NSString *message) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *window = nil;
 
-        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
             if ([scene isKindOfClass:[UIWindowScene class]]) {
-                for (UIWindow *w in scene.windows) {
+                UIWindowScene *ws = (UIWindowScene *)scene;
+                for (UIWindow *w in ws.windows) {
                     if (w.isKeyWindow) {
                         window = w;
                         break;
@@ -119,6 +123,7 @@ static int hook_connect(int sockfd, const struct sockaddr *addr, socklen_t addrl
     inet_ntop(AF_INET, &s->sin_addr, dest_ip, sizeof(dest_ip));
     int dest_port = ntohs(s->sin_port);
 
+    // Ignore localhost
     if (strncmp(dest_ip, "127.", 4) == 0)
         return orig_connect(sockfd, addr, addrlen);
 
@@ -150,14 +155,13 @@ static void init() {
         {"connect", hook_connect, (void **)&orig_connect}
     }, 1);
 
-    // HARD proof dylib loaded
+    // Proof dylib loaded
     FILE *f = fopen("/tmp/proxy_loaded.txt", "w");
     if (f) {
         fputs("loaded", f);
         fclose(f);
     }
 
-    // Show banner after delay
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
         show_banner(@"🟢 Proxy Active → roundhouse.proxy.rlwy.net:58298");
