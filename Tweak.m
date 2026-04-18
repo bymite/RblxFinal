@@ -1,6 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <CFNetwork/CFNetwork.h>
-#include <substrate.h>
+#import <objc/runtime.h>
 
 static NSDictionary *proxyDict() {
     return @{
@@ -27,16 +27,13 @@ static NSURLSessionConfiguration *hook_ephemeralConfig(id self, SEL _cmd) {
 
 __attribute__((constructor))
 static void init() {
-    MSHookMessageEx(
-        objc_getMetaClass("NSURLSessionConfiguration"),
-        @selector(defaultSessionConfiguration),
-        (IMP)hook_defaultConfig,
-        (IMP *)&orig_defaultConfig
-    );
-    MSHookMessageEx(
-        objc_getMetaClass("NSURLSessionConfiguration"),
-        @selector(ephemeralSessionConfiguration),
-        (IMP)hook_ephemeralConfig,
-        (IMP *)&orig_ephemeralConfig
-    );
+    Class cls = objc_getMetaClass("NSURLSessionConfiguration");
+
+    Method m1 = class_getClassMethod([NSURLSessionConfiguration class], @selector(defaultSessionConfiguration));
+    orig_defaultConfig = (void *)method_getImplementation(m1);
+    method_setImplementation(m1, (IMP)hook_defaultConfig);
+
+    Method m2 = class_getClassMethod([NSURLSessionConfiguration class], @selector(ephemeralSessionConfiguration));
+    orig_ephemeralConfig = (void *)method_getImplementation(m2);
+    method_setImplementation(m2, (IMP)hook_ephemeralConfig);
 }
