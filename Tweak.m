@@ -1,8 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
-#import <CoreGraphics/CoreGraphics.h>   // ✅ FIX: ensures CGRectInset links
 #import <objc/runtime.h>
-
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -11,7 +9,6 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
-
 #include "fishhook.h"
 
 #define PROXY_HOST "roundhouse.proxy.rlwy.net"
@@ -21,16 +18,25 @@ static int (*orig_connect)(int, const struct sockaddr *, socklen_t);
 static uint32_t proxy_ip = 0;
 static int hooking_active = 0;
 
+#pragma mark - Logging
+
+static void log_msg(const char *msg) {
+    FILE *f = fopen("/tmp/proxy_log.txt", "a");
+    if (f) {
+        fprintf(f, "%s\n", msg);
+        fclose(f);
+    }
+}
+
 #pragma mark - Banner
 
 static void show_banner(NSString *message) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *window = nil;
 
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
             if ([scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *ws = (UIWindowScene *)scene;
-                for (UIWindow *w in ws.windows) {
+                for (UIWindow *w in scene.windows) {
                     if (w.isKeyWindow) {
                         window = w;
                         break;
@@ -45,7 +51,7 @@ static void show_banner(NSString *message) {
         banner.backgroundColor = [UIColor colorWithRed:0.0 green:0.7 blue:0.3 alpha:0.95];
         banner.alpha = 0;
 
-        UILabel *label = [[UILabel alloc] initWithFrame:CGRectInset(banner.bounds, 12, 6)];
+        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(12, 6, banner.bounds.size.width - 24, 38)];
         label.text = message;
         label.textColor = [UIColor whiteColor];
         label.font = [UIFont boldSystemFontOfSize:13];
@@ -77,27 +83,30 @@ static void resolve_proxy() {
     struct hostent *he = gethostbyname(PROXY_HOST);
     if (he && he->h_addrtype == AF_INET) {
         memcpy(&proxy_ip, he->h_addr_list[0], 4);
+        log_msg("Proxy resolved");
+    } else {
+        log_msg("Proxy resolve failed");
     }
 }
 
 static int socks5_handshake(int sockfd, const char *dest_ip, int dest_port) {
     uint8_t greeting[] = {0x05, 0x01, 0x00};
-    if (send(sockfd, greeting, sizeof(greeting), 0) < 0) return -1;
+    if (send(sockfd, greeting, 3, 0) < 0) return -1;
 
     uint8_t resp[2];
     if (recv(sockfd, resp, 2, 0) < 2) return -1;
     if (resp[1] != 0x00) return -1;
 
     struct in_addr ipv4;
-    uint8_t req[10];
-
-    req[0]=0x05; req[1]=0x01; req[2]=0x00; req[3]=0x01;
-
     if (inet_pton(AF_INET, dest_ip, &ipv4) != 1) return -1;
 
-    memcpy(req+4, &ipv4, 4);
-    req[8]=(dest_port>>8)&0xFF;
-    req[9]=dest_port&0xFF;
+    uint8_t req[10] = {
+        0x05, 0x01, 0x00, 0x01
+    };
+
+    memcpy(req + 4, &ipv4, 4);
+    req[8] = (dest_port >> 8) & 0xFF;
+    req[9] = dest_port & 0xFF;
 
     if (send(sockfd, req, 10, 0) < 0) return -1;
 
@@ -123,13 +132,20 @@ static int hook_connect(int sockfd, const struct sockaddr *addr, socklen_t addrl
     inet_ntop(AF_INET, &s->sin_addr, dest_ip, sizeof(dest_ip));
     int dest_port = ntohs(s->sin_port);
 
-    // Ignore localhost
-    if (strncmp(dest_ip, "127.", 4) == 0)
+    // Only proxy HTTPS (Roblox uses 443)
+    if (dest_port != 443) {
         return orig_connect(sockfd, addr, addrlen);
+    }
+
+    char logbuf[128];
+    snprintf(logbuf, sizeof(logbuf), "Intercept: %s:%d", dest_ip, dest_port);
+    log_msg(logbuf);
 
     resolve_proxy();
-    if (proxy_ip == 0)
+    if (proxy_ip == 0) {
+        log_msg("Proxy unavailable, fallback");
         return orig_connect(sockfd, addr, addrlen);
+    }
 
     struct sockaddr_in proxy_addr;
     memset(&proxy_addr, 0, sizeof(proxy_addr));
@@ -141,10 +157,18 @@ static int hook_connect(int sockfd, const struct sockaddr *addr, socklen_t addrl
     int result = orig_connect(sockfd, (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
     hooking_active = 0;
 
-    if (result != 0)
+    if (result != 0) {
+        log_msg("Proxy connect failed, fallback");
         return orig_connect(sockfd, addr, addrlen);
+    }
 
-    return socks5_handshake(sockfd, dest_ip, dest_port);
+    if (socks5_handshake(sockfd, dest_ip, dest_port) != 0) {
+        log_msg("SOCKS failed, fallback");
+        return orig_connect(sockfd, addr, addrlen);
+    }
+
+    log_msg("Proxy success");
+    return 0;
 }
 
 #pragma mark - Init
@@ -155,15 +179,10 @@ static void init() {
         {"connect", hook_connect, (void **)&orig_connect}
     }, 1);
 
-    // Proof dylib loaded
-    FILE *f = fopen("/tmp/proxy_loaded.txt", "w");
-    if (f) {
-        fputs("loaded", f);
-        fclose(f);
-    }
+    log_msg("=== Tweak Loaded ===");
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
-        show_banner(@"🟢 Proxy Active → roundhouse.proxy.rlwy.net:58298");
+        show_banner(@"🟢 Proxy Active → roundhouse.proxy.rlwy.net");
     });
 }
