@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <CFNetwork/CFNetwork.h>
 #import <objc/runtime.h>
 
 #include <stdio.h>
@@ -23,10 +24,6 @@ static int (*orig_getaddrinfo)(const char *, const char *, const struct addrinfo
 static uint32_t proxy_ip = 0;
 static int hooking_active = 0;
 
-#define MAX_HOST_CACHE 512
-static struct { uint32_t ip; char host[256]; } host_cache[MAX_HOST_CACHE];
-static int host_cache_count = 0;
-
 #pragma mark - Live Log UI
 
 static UITextView *logView = nil;
@@ -37,9 +34,7 @@ static void proxy_log(NSString *fmt, ...) {
     va_start(args, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
     va_end(args);
-
     NSLog(@"[ProxyTweak] %@", msg);
-
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!logLines) logLines = [NSMutableArray array];
         NSDateFormatter *df = [[NSDateFormatter alloc] init];
@@ -56,35 +51,72 @@ static void proxy_log(NSString *fmt, ...) {
 
 static void setup_log_ui(UIWindow *window) {
     if (logView) return;
-
-    // Semi-transparent dark overlay at bottom half of screen
     UIView *container = [[UIView alloc] initWithFrame:CGRectMake(0,
         window.bounds.size.height * 0.45,
         window.bounds.size.width,
         window.bounds.size.height * 0.55)];
     container.backgroundColor = [UIColor colorWithWhite:0 alpha:0.75];
-
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(8, 4, container.bounds.size.width - 16, 20)];
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(8, 4, container.bounds.size.width-16, 20)];
     title.text = @"🔌 Proxy Live Logs";
     title.textColor = [UIColor greenColor];
     title.font = [UIFont boldSystemFontOfSize:12];
     [container addSubview:title];
-
     logView = [[UITextView alloc] initWithFrame:CGRectMake(4, 26,
-        container.bounds.size.width - 8,
-        container.bounds.size.height - 30)];
+        container.bounds.size.width-8, container.bounds.size.height-30)];
     logView.backgroundColor = [UIColor clearColor];
     logView.textColor = [UIColor colorWithRed:0.2 green:1.0 blue:0.4 alpha:1.0];
     logView.font = [UIFont fontWithName:@"Menlo" size:9];
     logView.editable = NO;
     logView.selectable = NO;
     [container addSubview:logView];
-
-    container.tag = 9999;
     [window addSubview:container];
 }
 
+#pragma mark - NSURLSession hooks (intercept at highest level)
+
+static NSURLSessionConfiguration *(*orig_defaultConfig)(id, SEL);
+static NSURLSessionConfiguration *hook_defaultConfig(id self, SEL _cmd) {
+    proxy_log(@"[NSURLSession] defaultSessionConfiguration hooked");
+    NSURLSessionConfiguration *c = orig_defaultConfig(self, _cmd);
+    c.connectionProxyDictionary = @{
+        @"SOCKSEnable": @1,
+        @"SOCKSProxy": @PROXY_HOST,
+        @"SOCKSPort": @PROXY_PORT,
+    };
+    return c;
+}
+
+static NSURLSessionConfiguration *(*orig_ephemeralConfig)(id, SEL);
+static NSURLSessionConfiguration *hook_ephemeralConfig(id self, SEL _cmd) {
+    proxy_log(@"[NSURLSession] ephemeralSessionConfiguration hooked");
+    NSURLSessionConfiguration *c = orig_ephemeralConfig(self, _cmd);
+    c.connectionProxyDictionary = @{
+        @"SOCKSEnable": @1,
+        @"SOCKSProxy": @PROXY_HOST,
+        @"SOCKSPort": @PROXY_PORT,
+    };
+    return c;
+}
+
+// Hook NSURLSession init with configuration to catch already-created configs
+static id (*orig_sessionWithConfig)(id, SEL, NSURLSessionConfiguration *, id, NSOperationQueue *);
+static id hook_sessionWithConfig(id self, SEL _cmd, NSURLSessionConfiguration *config, id delegate, NSOperationQueue *queue) {
+    proxy_log(@"[NSURLSession] sessionWithConfiguration called");
+    if (config) {
+        config.connectionProxyDictionary = @{
+            @"SOCKSEnable": @1,
+            @"SOCKSProxy": @PROXY_HOST,
+            @"SOCKSPort": @PROXY_PORT,
+        };
+    }
+    return orig_sessionWithConfig(self, _cmd, config, delegate, queue);
+}
+
 #pragma mark - Host Cache
+
+#define MAX_HOST_CACHE 512
+static struct { uint32_t ip; char host[256]; } host_cache[MAX_HOST_CACHE];
+static int host_cache_count = 0;
 
 static void cache_host(uint32_t ip, const char *host) {
     for (int i = 0; i < host_cache_count; i++)
@@ -93,7 +125,6 @@ static void cache_host(uint32_t ip, const char *host) {
     host_cache[host_cache_count].ip = ip;
     strncpy(host_cache[host_cache_count].host, host, 255);
     host_cache_count++;
-    proxy_log(@"DNS cached: %s → %u", host, ip);
 }
 
 static const char *lookup_host(uint32_t ip) {
@@ -112,11 +143,10 @@ static int hook_getaddrinfo(const char *hostname, const char *servname,
     return result;
 }
 
-#pragma mark - Proxy
+#pragma mark - SOCKS5
 
 static void resolve_proxy() {
     if (proxy_ip != 0) return;
-    proxy_log(@"Resolving proxy host...");
     hooking_active = 1;
     struct hostent *he = gethostbyname(PROXY_HOST);
     hooking_active = 0;
@@ -140,29 +170,23 @@ static int wait_for_connect(int fd, int secs) {
 }
 
 static int socks5_handshake(int fd, const char *host, int port) {
-    proxy_log(@"SOCKS5 handshake → %s:%d", host, port);
     uint8_t g[] = {0x05, 0x01, 0x00};
-    if (send(fd, g, 3, MSG_NOSIGNAL) < 0) { proxy_log(@"❌ send greeting failed"); return -1; }
+    if (send(fd, g, 3, MSG_NOSIGNAL) < 0) { proxy_log(@"❌ greeting send failed"); return -1; }
     uint8_t r[2];
-    if (recv(fd, r, 2, 0) < 2 || r[1] != 0x00) { proxy_log(@"❌ greeting response bad"); return -1; }
-
+    if (recv(fd, r, 2, 0) < 2 || r[1] != 0x00) { proxy_log(@"❌ greeting resp bad"); return -1; }
     size_t hl = strlen(host);
     uint8_t req[7+256];
     req[0]=0x05; req[1]=0x01; req[2]=0x00; req[3]=0x03;
     req[4]=(uint8_t)hl;
     memcpy(req+5, host, hl);
     req[5+hl]=(port>>8)&0xFF; req[6+hl]=port&0xFF;
-    if (send(fd, req, 7+hl, MSG_NOSIGNAL) < 0) { proxy_log(@"❌ send req failed"); return -1; }
-
+    if (send(fd, req, 7+hl, MSG_NOSIGNAL) < 0) { proxy_log(@"❌ req send failed"); return -1; }
     uint8_t sr[10];
     if (recv(fd, sr, 10, 0) < 2) { proxy_log(@"❌ no response"); return -1; }
-    if (sr[1] != 0x00) { proxy_log(@"❌ SOCKS5 error code: %d", sr[1]); return -1; }
-
+    if (sr[1] != 0x00) { proxy_log(@"❌ SOCKS5 error: %d", sr[1]); return -1; }
     proxy_log(@"✅ Tunneled → %s:%d", host, port);
     return 0;
 }
-
-#pragma mark - Hook
 
 static int hook_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     if (!addr || hooking_active)
@@ -180,17 +204,15 @@ static int hook_connect(int sockfd, const struct sockaddr *addr, socklen_t addrl
 
     resolve_proxy();
     if (proxy_ip == 0) {
-        proxy_log(@"⚠️ No proxy IP, bypassing %s:%d", dest_ip, dest_port);
+        proxy_log(@"⚠️ No proxy, bypassing %s:%d", dest_ip, dest_port);
         return orig_connect(sockfd, addr, addrlen);
     }
-
     if (s->sin_addr.s_addr == proxy_ip)
         return orig_connect(sockfd, addr, addrlen);
 
     const char *hostname = lookup_host(s->sin_addr.s_addr);
     const char *dest = hostname ? hostname : dest_ip;
-
-    proxy_log(@"→ connect(%s:%d) via proxy", dest, dest_port);
+    proxy_log(@"→ connect(%s:%d)", dest, dest_port);
 
     int flags = fcntl(sockfd, F_GETFL, 0);
     fcntl(sockfd, F_SETFL, flags & ~O_NONBLOCK);
@@ -205,13 +227,11 @@ static int hook_connect(int sockfd, const struct sockaddr *addr, socklen_t addrl
     int r = orig_connect(sockfd, (struct sockaddr *)&px, sizeof(px));
     hooking_active = 0;
 
-    if (r != 0 && errno == EINPROGRESS) {
-        proxy_log(@"Waiting for proxy TCP connect...");
+    if (r != 0 && errno == EINPROGRESS)
         r = wait_for_connect(sockfd, 10);
-    }
 
     if (r != 0) {
-        proxy_log(@"❌ TCP connect to proxy failed (errno %d)", errno);
+        proxy_log(@"❌ TCP to proxy failed errno=%d", errno);
         fcntl(sockfd, F_SETFL, flags);
         return orig_connect(sockfd, addr, addrlen);
     }
@@ -221,34 +241,32 @@ static int hook_connect(int sockfd, const struct sockaddr *addr, socklen_t addrl
     return r;
 }
 
-static NSURLSessionConfiguration *(*orig_defaultConfig)(id, SEL);
-static NSURLSessionConfiguration *hook_defaultConfig(id self, SEL _cmd) {
-    NSURLSessionConfiguration *c = orig_defaultConfig(self, _cmd);
-    c.connectionProxyDictionary = @{
-        @"SOCKSEnable": @1,
-        @"SOCKSProxy": @PROXY_HOST,
-        @"SOCKSPort": @PROXY_PORT,
-    };
-    return c;
-}
-
 #pragma mark - Init
 
 __attribute__((constructor))
 static void init() {
+    // BSD socket hook
     rebind_symbols((struct rebinding[2]){
         {"connect",     hook_connect,     (void **)&orig_connect},
         {"getaddrinfo", hook_getaddrinfo, (void **)&orig_getaddrinfo},
     }, 2);
 
-    Method m = class_getClassMethod([NSURLSessionConfiguration class],
-                                    @selector(defaultSessionConfiguration));
-    orig_defaultConfig = (void *)method_getImplementation(m);
-    method_setImplementation(m, (IMP)hook_defaultConfig);
+    // NSURLSession hooks
+    Class sessClass = [NSURLSession class];
+    Method m1 = class_getClassMethod([NSURLSessionConfiguration class], @selector(defaultSessionConfiguration));
+    orig_defaultConfig = (void *)method_getImplementation(m1);
+    method_setImplementation(m1, (IMP)hook_defaultConfig);
+
+    Method m2 = class_getClassMethod([NSURLSessionConfiguration class], @selector(ephemeralSessionConfiguration));
+    orig_ephemeralConfig = (void *)method_getImplementation(m2);
+    method_setImplementation(m2, (IMP)hook_ephemeralConfig);
+
+    Method m3 = class_getClassMethod(sessClass, @selector(sessionWithConfiguration:delegate:delegateQueue:));
+    orig_sessionWithConfig = (void *)method_getImplementation(m3);
+    method_setImplementation(m3, (IMP)hook_sessionWithConfig);
 
     proxy_log(@"🟢 Dylib loaded. Proxy: %s:%d", PROXY_HOST, PROXY_PORT);
 
-    // Setup log UI once app is ready
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.5*NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
         UIWindow *window = nil;
@@ -257,6 +275,6 @@ static void init() {
                 for (UIWindow *w in ((UIWindowScene *)scene).windows)
                     if (w.isKeyWindow) { window = w; break; }
         if (window) setup_log_ui(window);
-        proxy_log(@"Log UI ready. Waiting for connections...");
+        proxy_log(@"Log UI ready");
     });
 }
