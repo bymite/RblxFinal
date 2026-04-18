@@ -24,7 +24,19 @@ jobs:
       - name: Build dylib with clang
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          clang -arch arm64 -isysroot $SDK -miphoneos-version-min=14.0 -dynamiclib -fobjc-arc -framework Foundation -framework UIKit -framework CFNetwork -framework CoreGraphics -o RobloxProxy.dylib Tweak.m fishhook.c
+          clang \
+            -arch arm64 \
+            -isysroot "$SDK" \
+            -miphoneos-version-min=14.0 \
+            -dynamiclib \
+            -fobjc-arc \
+            -framework Foundation \
+            -framework UIKit \
+            -framework CoreGraphics \
+            -framework CFNetwork \
+            -o RobloxProxy.dylib \
+            Tweak.m fishhook.c
+          echo "Built dylib:"
           ls -lh RobloxProxy.dylib
 
       - name: Install insert_dylib
@@ -38,7 +50,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release download Ipa --repo bymite/RblxFinal --pattern "*.ipa" --output Roblox.ipa
+          gh release download Ipa \
+            --repo bymite/RblxFinal \
+            --pattern "*.ipa" \
+            --output Roblox.ipa
+          echo "Downloaded:"
           ls -lh Roblox.ipa
 
       - name: Inject dylib into IPA
@@ -46,9 +62,14 @@ jobs:
           unzip -q Roblox.ipa -d roblox_extracted
           APP=$(find roblox_extracted/Payload -name "*.app" -maxdepth 1 | head -n 1)
           BINARY=$(find "$APP" -maxdepth 1 -type f -perm +111 | head -n 1)
+          echo "App: $APP"
+          echo "Binary: $BINARY"
           cp RobloxProxy.dylib "$APP/RobloxProxy.dylib"
-          insert_dylib --strip-codesig --inplace @executable_path/RobloxProxy.dylib "$BINARY"
-          cd roblox_extracted && zip -qr ../Roblox_patched.ipa Payload
+          insert_dylib --strip-codesig --inplace \
+            @executable_path/RobloxProxy.dylib \
+            "$BINARY"
+          cd roblox_extracted
+          zip -qr ../Roblox_patched.ipa Payload
           echo "Done!"
 
       - name: Upload patched IPA
