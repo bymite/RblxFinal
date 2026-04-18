@@ -1,0 +1,9 @@
+Package: com.dev.robloxproxy
+Name: RobloxProxy
+Depends: mobilesubstrate
+Version: 0.0.1
+Architecture: iphoneos-arm64
+Description: Force Roblox to route through proxy
+Maintainer: dev
+Author: dev
+Section: Tweaks
